@@ -1,0 +1,1432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="dark light">
+<title>Autoclicker</title>
+<style>
+/* Instrument Serif + JetBrains Mono, base64-inlined at build time (vendor/fonts.css). */
+/*@FONTS@*/
+
+/* ---------------------------------------------------------------- "Metronome"
+   An instrument panel: warm paper on ink, hairline rules, one signal colour
+   reserved for "live". The click field behind the counter makes the rhythm visible. */
+
+:root {
+  color-scheme: dark light;
+  --bg: #0b0b0c;
+  --text: #efebe3;
+  --text-2: rgba(239, 235, 227, 0.6);
+  --text-3: rgba(239, 235, 227, 0.36);
+  --rule: rgba(239, 235, 227, 0.13);
+  --rule-strong: rgba(239, 235, 227, 0.26);
+  --signal: #ff5b22;
+  --on-signal: #170700;
+  --primary: #efebe3;
+  --on-primary: #0b0b0c;
+  --warn: #ffb547;
+  --error: #ff6b5b;
+
+  --serif: "Instrument Serif", "Times New Roman", serif;
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  --sans: "Segoe UI Variable Text", "Segoe UI Variable", system-ui, sans-serif;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f2eee6;
+    --text: #141414;
+    --text-2: rgba(20, 20, 20, 0.62);
+    --text-3: rgba(20, 20, 20, 0.4);
+    --rule: rgba(20, 20, 20, 0.12);
+    --rule-strong: rgba(20, 20, 20, 0.28);
+    --signal: #e2440c;
+    --on-signal: #ffffff;
+    --primary: #141414;
+    --on-primary: #f2eee6;
+    --warn: #9a5800;
+    --error: #c11f0d;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { height: 100%; margin: 0; }
+
+body {
+  font-family: var(--sans);
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  color: var(--text);
+  background: var(--bg);
+  overflow: hidden;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem 1rem 0.875rem;
+}
+
+/* Mono data labels: small text gets positive tracking. */
+.mono {
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  font-weight: 500;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+/* ---------------------------------------------------------------- Masthead */
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 1.75rem;
+  color: var(--text-2);
+}
+
+.wordmark { color: var(--text); }
+
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4375rem;
+  max-width: 14rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dot {
+  position: relative;
+  flex: none;
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.state[data-tone="running"],
+.state[data-tone="picking"] { color: var(--text); }
+.state[data-tone="running"] .dot,
+.state[data-tone="picking"] .dot,
+.state[data-tone="done"] .dot { background: var(--signal); }
+.state[data-tone="waiting"] { color: var(--warn); }
+.state[data-tone="waiting"] .dot { background: var(--warn); }
+.state[data-tone="error"] { color: var(--error); }
+.state[data-tone="error"] .dot { background: var(--error); }
+
+/* Live signal while clicking: ~0.8 Hz, a CSS animation so it never competes with the UI thread. */
+.state[data-tone="running"] .dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--signal);
+  animation: pulse 1.2s var(--ease-out) infinite;
+}
+
+@keyframes pulse {
+  from { transform: scale(1); opacity: 0.7; }
+  to { transform: scale(3); opacity: 0; }
+}
+
+/* ---------------------------------------------------------------- Stage */
+
+.stage {
+  position: relative;
+  flex: none;
+  height: 8.5rem;
+  margin: 0 -1rem;
+  padding: 0 1rem 0.625rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+/* WebGL click field. Its one job: turn each click into a ripple through the graticule. */
+#field {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+}
+
+.has-field #field { display: block; }
+
+/* Static poster: the same graticule, at rest. Shown without WebGL or under reduced motion. */
+.stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle, var(--text-3) 0.75px, transparent 1.25px);
+  background-size: 12px 12px;
+  background-position: 0 0;
+  opacity: 0.5;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 30%, #000 70%, transparent),
+                      linear-gradient(to right, transparent, #000 12%, #000 88%, transparent);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(to bottom, transparent, #000 30%, #000 70%, transparent),
+              linear-gradient(to right, transparent, #000 12%, #000 88%, transparent);
+  mask-composite: intersect;
+}
+
+.has-field .stage::before { display: none; }
+
+.readout { position: relative; }
+
+.count-mask { overflow: hidden; padding-top: 0.25rem; }
+
+.count {
+  display: block;
+  font-family: var(--serif);
+  font-size: 5.75rem;
+  font-weight: 400;
+  line-height: 0.86;
+  letter-spacing: -0.025em;
+  white-space: nowrap;
+  font-feature-settings: "lnum" 1, "tnum" 1;
+}
+
+.caption {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.5rem;
+  color: var(--text-2);
+}
+
+.hint {
+  position: absolute;
+  top: 0.5rem;
+  right: 1rem;
+  margin: 0;
+  color: var(--warn);
+  visibility: hidden;
+}
+
+/* ---------------------------------------------------------------- Start / Stop */
+
+.primary {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 3.25rem;
+  margin-top: 0.75rem;
+  padding: 0 0.875rem 0 1.125rem;
+  border: 0;
+  border-radius: 0.25rem;
+  background-color: var(--primary);
+  color: var(--on-primary);
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  transition: transform 160ms var(--ease-out);
+}
+
+.primary::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .primary:hover::after { opacity: 0.06; }
+}
+
+.primary:active:not([aria-disabled="true"]) { transform: scale(0.98); }
+.primary:active:not([aria-disabled="true"])::after { opacity: 0.12; }
+.primary[aria-disabled="true"] { cursor: not-allowed; opacity: 0.4; }
+
+.primary-mask {
+  position: relative;
+  height: 2rem;
+  flex: 1;
+  overflow: hidden;
+}
+
+.primary-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 1.75rem;
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+
+.primary-label svg { width: 0.875rem; height: 0.875rem; flex: none; }
+.primary-label.stop { transform: translateY(100%); }
+
+.primary kbd {
+  flex: none;
+  min-width: 2.25rem;
+  padding: 0.1875rem 0.375rem;
+  border: 1px solid currentColor;
+  border-radius: 0.1875rem;
+  font: inherit;
+  text-align: center;
+  opacity: 0.55;
+}
+
+/* ---------------------------------------------------------------- Spec sheet */
+
+.sheet {
+  flex: none;
+  margin-top: 0.875rem;
+}
+
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  height: 2rem;
+}
+
+.rule {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: var(--rule);
+  transform-origin: left center;
+}
+
+.row:last-child .rule.bottom { top: auto; bottom: 0; }
+
+.row-label {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+  color: var(--text-2);
+}
+
+.row-sub { color: var(--text); letter-spacing: 0.02em; }
+.row-sub:empty { display: none; }
+
+.row-control {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: none;
+}
+
+/* Text choices with a sliding signal underline (GSAP moves it on transform only). */
+.choice {
+  position: relative;
+  display: inline-flex;
+}
+
+.choice button {
+  height: 1.75rem;
+  padding: 0 0.4375rem;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  cursor: pointer;
+  transition: color 150ms ease, transform 160ms var(--ease-out);
+}
+
+.choice button[aria-checked="true"] { color: var(--text); }
+.choice button:active { transform: scale(0.96); }
+
+@media (hover: hover) and (pointer: fine) {
+  .choice button:not([aria-checked="true"]):hover { color: var(--text-2); }
+}
+
+.choice-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0.1875rem;
+  width: 100px;
+  height: 1.5px;
+  background: var(--signal);
+  transform-origin: left center;
+  pointer-events: none;
+}
+
+.field {
+  width: 3.5rem;
+  height: 1.5rem;
+  padding: 0 0.125rem;
+  border: 0;
+  border-bottom: 1px solid var(--rule-strong);
+  border-radius: 0;
+  background: none;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-align: right;
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+  transition: border-color 150ms ease, opacity 150ms ease;
+}
+
+.field:focus { border-bottom-color: var(--signal); }
+.field.warn { border-bottom-color: var(--warn); color: var(--warn); }
+.field[aria-invalid="true"] { border-bottom-color: var(--error); color: var(--error); }
+.field:disabled { opacity: 0.3; }
+.field.count { width: 3.25rem; margin-left: 0.25rem; }
+
+.pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  height: 1.75rem;
+  margin-left: 0.25rem;
+  padding: 0 0.4375rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0.1875rem;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out), background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+
+.pick svg { width: 0.75rem; height: 0.75rem; }
+
+.keycap {
+  min-width: 3.25rem;
+  height: 1.625rem;
+  padding: 0 0.5rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0.1875rem;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out), background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+
+.keycap:active { transform: scale(0.96); }
+.keycap[aria-pressed="true"] { background: var(--signal); border-color: var(--signal); color: var(--on-signal); }
+
+@media (hover: hover) and (pointer: fine) {
+  .keycap:not([aria-pressed="true"]):hover { border-color: var(--text-2); }
+}
+.pick:active { transform: scale(0.96); }
+.pick[aria-pressed="true"] { background: var(--signal); border-color: var(--signal); color: var(--on-signal); }
+
+@media (hover: hover) and (pointer: fine) {
+  .pick:not([aria-pressed="true"]):hover { border-color: var(--text-2); }
+}
+
+/* ---------------------------------------------------------------- Footer */
+
+.foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: auto;
+  color: var(--text-3);
+}
+
+.foot > * { white-space: nowrap; }
+.foot > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.foot .warn { color: var(--warn); }
+.foot .error { color: var(--error); }
+
+/* ---------------------------------------------------------------- Focus & a11y */
+
+:focus-visible { outline: 1.5px solid var(--signal); outline-offset: 2px; }
+.field:focus-visible { outline: none; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .state[data-tone="running"] .dot::after { display: none; }
+  .primary:active:not([aria-disabled="true"]),
+  .choice button:active,
+  .pick:active,
+  .keycap:active { transform: none; }
+}
+
+@media (prefers-contrast: more) {
+  :root { --text-2: var(--text); --text-3: rgba(239, 235, 227, 0.7); --rule: var(--rule-strong); }
+}
+
+@media (prefers-contrast: more) and (prefers-color-scheme: light) {
+  :root { --text-3: rgba(20, 20, 20, 0.72); }
+}
+
+@media (forced-colors: active) {
+  #field, .stage::before { display: none !important; }
+  .primary { border: 2px solid ButtonText; background: ButtonFace !important; color: ButtonText !important; }
+  .choice-bar { forced-color-adjust: none; background: Highlight; }
+  .choice button[aria-checked="true"] { color: Highlight; }
+  .rule { background: CanvasText; }
+  .dot { forced-color-adjust: none; background: CanvasText !important; }
+}
+</style>
+</head>
+<body>
+<main class="app">
+
+  <header class="masthead mono">
+    <span class="wordmark">Autoclicker</span>
+    <span class="state" id="status" role="status" data-tone="idle">
+      <span class="dot" aria-hidden="true"></span><span id="status-text">Idle</span>
+    </span>
+  </header>
+
+  <section class="stage" id="stage" aria-label="Click counter">
+    <canvas id="field" aria-hidden="true"></canvas>
+    <p class="hint mono" id="hint">Move the cursor off this window</p>
+    <div class="readout">
+      <div class="count-mask"><span class="count" id="count">0</span></div>
+      <div class="caption mono">
+        <span id="count-label">Clicks</span>
+        <span id="rate"></span>
+      </div>
+    </div>
+  </section>
+
+  <button class="primary" id="toggle" type="button" data-state="start">
+    <span class="primary-mask">
+      <span class="primary-label start" id="start-label">
+        <!-- Solar "play-bold", CC BY 4.0, 480 Design -->
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M21.4086 9.35258C23.5305 10.5065 23.5305 13.4935 21.4086 14.6474L8.59662 21.6145C6.53435 22.736 4 21.2763 4 18.9671L4 5.0329C4 2.72368 6.53435 1.26402 8.59661 2.38548L21.4086 9.35258Z"/></svg>
+        Start
+      </span>
+      <span class="primary-label stop" id="stop-label" aria-hidden="true">
+        <!-- Solar "stop-bold", CC BY 4.0, 480 Design -->
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M2 12C2 7.28595 2 4.92893 3.46447 3.46447C4.92893 2 7.28595 2 12 2C16.714 2 19.0711 2 20.5355 3.46447C22 4.92893 22 7.28595 22 12C22 16.714 22 19.0711 20.5355 20.5355C19.0711 22 16.714 22 12 22C7.28595 22 4.92893 22 3.46447 20.5355C2 19.0711 2 16.714 2 12Z"/></svg>
+        Stop
+      </span>
+    </span>
+    <kbd class="mono" id="shortcut">F6</kbd>
+  </button>
+
+  <section class="sheet mono" id="options" aria-label="Options">
+
+    <div class="row">
+      <i class="rule" aria-hidden="true"></i>
+      <label class="row-label" for="interval">Interval</label>
+      <div class="row-control">
+        <input class="field" id="interval" inputmode="decimal" value="100" autocomplete="off"
+               spellcheck="false" aria-describedby="note">
+        <div class="choice" role="radiogroup" aria-label="Interval unit" data-name="unit">
+          <button type="button" role="radio" aria-checked="true" data-value="ms">ms</button>
+          <button type="button" role="radio" aria-checked="false" data-value="s">s</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <i class="rule" aria-hidden="true"></i>
+      <span class="row-label" id="button-label">Button</span>
+      <div class="row-control">
+        <div class="choice" role="radiogroup" aria-labelledby="button-label" data-name="button">
+          <button type="button" role="radio" aria-checked="true" data-value="left">Left</button>
+          <button type="button" role="radio" aria-checked="false" data-value="right">Right</button>
+          <button type="button" role="radio" aria-checked="false" data-value="middle">Middle</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <i class="rule" aria-hidden="true"></i>
+      <span class="row-label" id="type-label">Click</span>
+      <div class="row-control">
+        <div class="choice" role="radiogroup" aria-labelledby="type-label" data-name="type">
+          <button type="button" role="radio" aria-checked="true" data-value="single">Single</button>
+          <button type="button" role="radio" aria-checked="false" data-value="double">Double</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <i class="rule" aria-hidden="true"></i>
+      <span class="row-label" id="repeat-label">Repeat</span>
+      <div class="row-control">
+        <div class="choice" role="radiogroup" aria-labelledby="repeat-label" data-name="repeat">
+          <button type="button" role="radio" aria-checked="true" data-value="forever">Until stopped</button>
+          <button type="button" role="radio" aria-checked="false" data-value="count">Count</button>
+        </div>
+        <input class="field count" id="count-input" inputmode="numeric" value="100" autocomplete="off"
+               spellcheck="false" aria-label="Number of clicks" disabled>
+      </div>
+    </div>
+
+    <div class="row">
+      <i class="rule" aria-hidden="true"></i>
+      <span class="row-label" id="position-label">Position <span class="row-sub" id="point-text"></span></span>
+      <div class="row-control">
+        <div class="choice" role="radiogroup" aria-labelledby="position-label" data-name="position">
+          <button type="button" role="radio" aria-checked="true" data-value="cursor">Cursor</button>
+          <button type="button" role="radio" aria-checked="false" data-value="point">Point</button>
+        </div>
+        <button class="pick" id="pick" type="button" aria-pressed="false">
+          <!-- Solar "target-bold", CC BY 4.0, 480 Design -->
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M11.2479 2C6.30929 2.36618 2.36618 6.30929 2 11.2479H4.98056C5.39592 11.2479 5.73264 11.5846 5.73264 12C5.73264 12.4154 5.39592 12.7521 4.98056 12.7521H2C2.36618 17.6907 6.30929 21.6338 11.2479 22V19.0194C11.2479 18.6041 11.5846 18.2674 12 18.2674C12.4154 18.2674 12.7521 18.6041 12.7521 19.0194V22C17.6907 21.6338 21.6338 17.6907 22 12.7521H19.0194C18.6041 12.7521 18.2674 12.4154 18.2674 12C18.2674 11.5846 18.6041 11.2479 19.0194 11.2479H22C21.6338 6.30929 17.6907 2.36618 12.7521 2V4.98056C12.7521 5.39592 12.4154 5.73264 12 5.73264C11.5846 5.73264 11.2479 5.39592 11.2479 4.98056V2ZM9.24236 12C9.24236 11.5846 9.57908 11.2479 9.99444 11.2479H11.2479V9.99444C11.2479 9.57908 11.5846 9.24236 12 9.24236C12.4154 9.24236 12.7521 9.57908 12.7521 9.99444V11.2479H14.0056C14.4209 11.2479 14.7576 11.5846 14.7576 12C14.7576 12.4154 14.4209 12.7521 14.0056 12.7521H12.7521V14.0056C12.7521 14.4209 12.4154 14.7576 12 14.7576C11.5846 14.7576 11.2479 14.4209 11.2479 14.0056V12.7521H9.99444C9.57908 12.7521 9.24236 12.4154 9.24236 12Z"/></svg>
+          <span id="pick-text">Pick</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="row">
+      <i class="rule" aria-hidden="true"></i>
+      <i class="rule bottom" aria-hidden="true"></i>
+      <span class="row-label" id="hotkey-label">Hotkey</span>
+      <div class="row-control">
+        <button class="keycap" id="hotkey" type="button" aria-pressed="false"
+                aria-labelledby="hotkey-label hotkey" aria-describedby="note">F6</button>
+      </div>
+    </div>
+
+  </section>
+
+  <footer class="foot mono">
+    <span id="note" aria-live="polite"></span>
+    <span>Esc stops</span>
+  </footer>
+</main>
+
+<!-- GSAP 3.13.0, inlined at build time (vendor/gsap.min.js). -->
+<script>/*@GSAP@*/</script>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ Native bridge */
+
+// Bound by main.c via webview_bind. Stubbed so the page still loads in a plain browser.
+function native(name) {
+  return (...args) => typeof window[name] === "function"
+    ? window[name](...args)
+    : Promise.resolve({ ok: false, error: "Native bridge unavailable" });
+}
+const bridge = {
+  start: native("clickerStart"),
+  stop: native("clickerStop"),
+  pickStart: native("pickStart"),
+  pickCancel: native("pickCancel"),
+  ready: native("appReady"),
+  captureBegin: native("hotkeyCaptureBegin"),
+  captureEnd: native("hotkeyCaptureEnd"),
+  setHotkey: native("hotkeySet"),
+};
+
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const hasGsap = typeof window.gsap !== "undefined";
+const motionOn = () => hasGsap && !reducedMotion.matches;
+
+/* ------------------------------------------------------------------ Keyboard = no motion */
+
+// Changes caused by a key (F6, Esc, Enter, arrows) land instantly; animation
+// between a key press and its result only reads as lag.
+let keyboardUntil = 0;
+function noteKeyboard() { keyboardUntil = performance.now() + 400; }
+const fromKeyboard = () => performance.now() < keyboardUntil;
+const animated = () => motionOn() && !fromKeyboard();
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/* ------------------------------------------------------------------ Click field (WebGL) */
+
+// One full-screen fragment shader over a dot graticule. Raw WebGL: a single
+// quad doesn't need Three.js. Renders once at rest; animates only while a
+// ripple is alive; pauses when hidden; replaced by the CSS poster on failure
+// or under reduced motion.
+const field = (() => {
+  const canvas = document.getElementById("field");
+  const stage = document.getElementById("stage");
+  const MAX_RIPPLES = 16;
+  const LIFE = 1.6;
+  const starts = new Float32Array(MAX_RIPPLES).fill(-100);
+  const origins = new Float32Array(MAX_RIPPLES * 2);
+  const epoch = performance.now();
+  let gl = null, uniforms = null, frame = 0, nextSlot = 0, ready = false;
+  let width = 0, height = 0, dpr = 1;
+  let resizeObserver = null;
+
+  const VERTEX = `
+    attribute vec2 a_pos;
+    void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+
+  const FRAGMENT = `
+    precision mediump float;
+    uniform vec2 u_size;
+    uniform float u_dpr;
+    uniform float u_time;
+    uniform float u_starts[${MAX_RIPPLES}];
+    uniform vec2 u_origins[${MAX_RIPPLES}];
+    uniform vec3 u_dot;
+    uniform vec3 u_signal;
+    const float SPACING = 12.0;
+    const float LIFE = ${LIFE.toFixed(1)};
+    const float SPEED = 150.0;
+
+    void main() {
+      vec2 p = vec2(gl_FragCoord.x, u_size.y * u_dpr - gl_FragCoord.y) / u_dpr;
+      vec2 center = (floor(p / SPACING) + 0.5) * SPACING;
+
+      float energy = 0.0;
+      for (int i = 0; i < ${MAX_RIPPLES}; i++) {
+        float age = u_time - u_starts[i];
+        if (age < 0.0 || age > LIFE) continue;
+        float d = distance(center, u_origins[i]);
+        float band = exp(-pow((d - age * SPEED) / 9.0, 2.0));
+        energy += band * pow(1.0 - age / LIFE, 1.5);
+      }
+      energy = min(energy, 1.0);
+
+      vec2 edges = min(p, u_size - p) / vec2(44.0, 30.0);
+      float edge = clamp(min(edges.x, edges.y), 0.0, 1.0);
+
+      float radius = 0.75 + energy * 1.6;
+      float dotMask = 1.0 - smoothstep(radius - 0.6, radius + 0.6, distance(p, center));
+      float alpha = dotMask * (0.2 + energy * 0.8) * edge;
+      vec3 color = mix(u_dot, u_signal, energy);
+      gl_FragColor = vec4(color * alpha, alpha);
+    }`;
+
+  function hexToRgb(hex) {
+    const value = parseInt(hex.replace("#", ""), 16);
+    return [(value >> 16 & 255) / 255, (value >> 8 & 255) / 255, (value & 255) / 255];
+  }
+
+  function compile(type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    return shader;
+  }
+
+  function init() {
+    if (reducedMotion.matches) { disable(); return; }
+    try {
+      gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: true, antialias: false, powerPreference: "low-power" });
+      if (!gl) throw new Error("WebGL unavailable");
+
+      const program = gl.createProgram();
+      gl.attachShader(program, compile(gl.VERTEX_SHADER, VERTEX));
+      gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAGMENT));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+      gl.useProgram(program);
+
+      const buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+      const position = gl.getAttribLocation(program, "a_pos");
+      gl.enableVertexAttribArray(position);
+      gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+
+      uniforms = {};
+      ["u_size", "u_dpr", "u_time", "u_starts", "u_origins", "u_dot", "u_signal"].forEach(name => {
+        uniforms[name] = gl.getUniformLocation(program, name);
+      });
+
+      ready = true;
+      document.body.classList.add("has-field");
+      applyTheme();
+      resize();
+    } catch (error) {
+      disable();
+    }
+  }
+
+  function disable() {
+    ready = false;
+    cancelAnimationFrame(frame);
+    frame = 0;
+    document.body.classList.remove("has-field");
+  }
+
+  function applyTheme() {
+    if (!ready) return;
+    gl.uniform3fv(uniforms.u_dot, hexToRgb(cssVar("--text")));
+    gl.uniform3fv(uniforms.u_signal, hexToRgb(cssVar("--signal")));
+    draw();
+  }
+
+  function resize() {
+    if (!ready) return;
+    dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    width = stage.clientWidth;
+    height = stage.clientHeight;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.uniform2f(uniforms.u_size, width, height);
+    gl.uniform1f(uniforms.u_dpr, dpr);
+    draw();
+  }
+
+  const now = () => (performance.now() - epoch) / 1000;
+  const alive = () => starts.some(t => now() - t < LIFE);
+
+  function draw() {
+    if (!ready) return;
+    gl.uniform1f(uniforms.u_time, now());
+    gl.uniform1fv(uniforms.u_starts, starts);
+    gl.uniform2fv(uniforms.u_origins, origins);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  function loop() {
+    draw();
+    frame = alive() && !document.hidden ? requestAnimationFrame(loop) : 0;
+  }
+
+  function ripple(x, y) {
+    if (!ready) return;
+    starts[nextSlot] = now();
+    origins[nextSlot * 2] = x;
+    origins[nextSlot * 2 + 1] = y;
+    nextSlot = (nextSlot + 1) % MAX_RIPPLES;
+    if (!frame && !document.hidden) frame = requestAnimationFrame(loop);
+  }
+
+  // Clicks come from the empty right side of the stage, opposite the counter.
+  function rippleFromSource() { ripple(width * 0.76, height * 0.42); }
+
+  canvas.addEventListener("webglcontextlost", e => { e.preventDefault(); disable(); });
+  canvas.addEventListener("webglcontextrestored", init);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && ready && alive() && !frame) frame = requestAnimationFrame(loop);
+  });
+
+  // Touching the field sends a ripple from that spot: additive, never required.
+  stage.addEventListener("pointerdown", e => {
+    const rect = stage.getBoundingClientRect();
+    ripple(e.clientX - rect.left, e.clientY - rect.top);
+  });
+
+  function start() {
+    init();
+    resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(stage);
+  }
+
+  function destroy() {
+    disable();
+    if (resizeObserver) resizeObserver.disconnect();
+    const lose = gl && gl.getExtension("WEBGL_lose_context");
+    if (lose) lose.loseContext();
+    gl = null;
+  }
+
+  return { start, destroy, applyTheme, ripple, rippleFromSource, disable, init };
+})();
+
+/* ------------------------------------------------------------------ Text choice control */
+
+class Choice {
+  constructor(root, onChange) {
+    this.root = root;
+    this.onChange = onChange;
+    this.buttons = [...root.querySelectorAll('[role="radio"]')];
+    this.index = Math.max(0, this.buttons.findIndex(b => b.getAttribute("aria-checked") === "true"));
+
+    this.bar = document.createElement("i");
+    this.bar.className = "choice-bar";
+    this.bar.setAttribute("aria-hidden", "true");
+    root.append(this.bar);
+
+    this.buttons.forEach((button, i) => {
+      button.addEventListener("click", e => {
+        if (e.detail === 0) noteKeyboard();
+        this.select(i, { emit: true });
+      });
+    });
+    root.addEventListener("keydown", e => this.onKey(e));
+    this.updateTabStops();
+  }
+
+  get value() { return this.buttons[this.index].dataset.value; }
+
+  select(i, { emit = false, focus = false } = {}) {
+    const changed = i !== this.index;
+    this.index = i;
+    this.buttons.forEach((b, j) => b.setAttribute("aria-checked", String(j === i)));
+    this.updateTabStops();
+    if (focus) this.buttons[i].focus();
+    // The underline always slides from the old choice to the new one on a
+    // click, even with Windows animation effects turned off: it's a small
+    // horizontal move that shows where the selection went. Keyboard changes
+    // still land instantly.
+    this.moveBar(hasGsap && !fromKeyboard());
+    if (emit && changed) this.onChange(this.value);
+  }
+
+  selectValue(value) {
+    const i = this.buttons.findIndex(b => b.dataset.value === value);
+    if (i >= 0) this.select(i);
+  }
+
+  // Underline spans the label text (the button minus its side padding).
+  moveBar(animate) {
+    const button = this.buttons[this.index];
+    const inset = parseFloat(getComputedStyle(button).paddingLeft);
+    const x = button.offsetLeft + inset;
+    const scaleX = (button.offsetWidth - inset * 2) / 100;
+    if (animate) {
+      gsap.to(this.bar, { x, scaleX, duration: 0.45, ease: "expo.inOut", overwrite: true });
+    } else if (hasGsap) {
+      gsap.set(this.bar, { x, scaleX, overwrite: true });
+    } else {
+      this.bar.style.transform = `translateX(${x}px) scaleX(${scaleX})`;
+    }
+  }
+
+  updateTabStops() {
+    this.buttons.forEach((b, j) => { b.tabIndex = j === this.index ? 0 : -1; });
+  }
+
+  onKey(e) {
+    const last = this.buttons.length - 1;
+    let next = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") next = Math.min(last, this.index + 1);
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = Math.max(0, this.index - 1);
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    if (next === null) return;
+    e.preventDefault();
+    noteKeyboard();
+    this.select(next, { emit: true, focus: true });
+  }
+}
+
+/* ------------------------------------------------------------------ Elements & state */
+
+const el = {
+  status: document.getElementById("status"),
+  statusText: document.getElementById("status-text"),
+  count: document.getElementById("count"),
+  countLabel: document.getElementById("count-label"),
+  rate: document.getElementById("rate"),
+  hint: document.getElementById("hint"),
+  toggle: document.getElementById("toggle"),
+  startLabel: document.getElementById("start-label"),
+  stopLabel: document.getElementById("stop-label"),
+  shortcut: document.getElementById("shortcut"),
+  options: document.getElementById("options"),
+  interval: document.getElementById("interval"),
+  countInput: document.getElementById("count-input"),
+  pick: document.getElementById("pick"),
+  pickText: document.getElementById("pick-text"),
+  pointText: document.getElementById("point-text"),
+  note: document.getElementById("note"),
+  hotkey: document.getElementById("hotkey"),
+};
+
+const state = {
+  clicker: "idle",     // idle | running
+  waiting: false,
+  picking: false,
+  point: null,
+  hotkeyAvailable: true,
+  hotkeyLabel: "F6",
+  capturing: false,
+  settingHotkey: false,
+  clicks: 0,
+  lastRipple: 0,
+};
+
+const numberFormat = new Intl.NumberFormat("en-US");
+
+/* ------------------------------------------------------------------ Visual state */
+
+function setStatus(text, tone) {
+  el.statusText.textContent = text;
+  el.status.dataset.tone = tone;
+}
+
+// Start <-> Stop: the label travels through a mask in the direction of the
+// change while the fill crossfades. Retargets from wherever it is mid-flight.
+function setActiveVisual(active) {
+  el.toggle.dataset.state = active ? "stop" : "start";
+  el.startLabel.setAttribute("aria-hidden", String(active));
+  el.stopLabel.setAttribute("aria-hidden", String(!active));
+  el.options.inert = active;
+
+  const outgoing = active ? el.startLabel : el.stopLabel;
+  const incoming = active ? el.stopLabel : el.startLabel;
+  const exitTo = active ? -100 : 100;
+  const enterFrom = active ? 100 : -100;
+  const fill = { backgroundColor: cssVar(active ? "--signal" : "--primary"), color: cssVar(active ? "--on-signal" : "--on-primary") };
+
+  if (!hasGsap) {
+    Object.assign(el.toggle.style, fill);
+    outgoing.style.transform = `translateY(${exitTo}%)`;
+    incoming.style.transform = "translateY(0)";
+  } else if (!animated()) {
+    gsap.set(el.toggle, fill);
+    gsap.set(outgoing, { yPercent: exitTo, overwrite: true });
+    gsap.set(incoming, { yPercent: 0, overwrite: true });
+  } else {
+    if (Math.abs(gsap.getProperty(incoming, "yPercent")) >= 99.9) gsap.set(incoming, { yPercent: enterFrom });
+    gsap.to(el.toggle, { ...fill, duration: 0.3, ease: "power2.out", overwrite: true });
+    gsap.to(outgoing, { yPercent: exitTo, duration: 0.5, ease: "expo.inOut", overwrite: true });
+    gsap.to(incoming, { yPercent: 0, duration: 0.5, ease: "expo.inOut", overwrite: true });
+  }
+  updateShortcut();
+}
+
+function showHint(visible) {
+  if (animated()) {
+    gsap.to(el.hint, { autoAlpha: visible ? 1 : 0, y: visible ? 0 : -4, duration: 0.3, ease: "power2.out", overwrite: true });
+  } else if (hasGsap) {
+    gsap.set(el.hint, { autoAlpha: visible ? 1 : 0, y: 0, overwrite: true });
+  } else {
+    el.hint.style.visibility = visible ? "visible" : "hidden";
+  }
+}
+
+// Fit very large counts inside the stage instead of overflowing it.
+let fittedLength = 0;
+function setCount(clicks) {
+  const text = numberFormat.format(clicks);
+  if (el.count.textContent !== text) el.count.textContent = text;
+  el.countLabel.textContent = clicks === 1 ? "Click" : "Clicks";
+  if (text.length !== fittedLength) {
+    fittedLength = text.length;
+    el.count.style.fontSize = "";
+    const available = el.count.parentElement.clientWidth;
+    const needed = el.count.scrollWidth;
+    if (needed > available) el.count.style.fontSize = `${5.75 * available / needed}rem`;
+  }
+}
+
+function updateShortcut() {
+  el.shortcut.textContent = state.picking || state.clicker !== "idle" ? "Esc" : state.hotkeyLabel;
+  el.shortcut.title = state.hotkeyAvailable ? "" : `${state.hotkeyLabel} is in use by another app`;
+  if (!state.capturing) el.hotkey.textContent = state.hotkeyLabel;
+}
+
+/* ------------------------------------------------------------------ Validation */
+
+function readInterval() {
+  const raw = el.interval.value.trim();
+  const unit = choices.unit.value;
+  if (!/^(\d+\.?\d*|\.\d+)$/.test(raw)) return { error: "Interval must be a number" };
+  const value = parseFloat(raw);
+  const ms = Math.round(unit === "s" ? value * 1000 : value);
+  if (ms < 1) return { error: "Shortest interval is 1 ms" };
+  if (ms > 86400000) return { error: "Longest interval is 24 h" };
+  return { value, unit, ms };
+}
+
+function readCount() {
+  const raw = el.countInput.value.trim();
+  if (!/^\d+$/.test(raw)) return null;
+  const count = parseInt(raw, 10);
+  return count >= 1 && count <= 1e9 ? count : null;
+}
+
+function formatRate(ms) {
+  const perSecond = 1000 / ms;
+  const trim = n => n.toFixed(1).replace(/\.0$/, "");
+  const rate = perSecond >= 10 ? `${Math.round(perSecond)} / sec`
+             : perSecond >= 1 ? `${trim(perSecond)} / sec`
+             : `1 / ${trim(ms / 1000)} s`;
+  return choices.type.value === "double" ? `${rate} × 2` : rate;
+}
+
+function setNote(text, tone) {
+  el.note.textContent = text;
+  el.note.className = tone || "";
+}
+
+function validate() {
+  const interval = readInterval();
+  el.interval.classList.remove("warn");
+
+  if (interval.error) {
+    el.interval.setAttribute("aria-invalid", "true");
+    el.rate.textContent = "—";
+    setNote(interval.error, "error");
+  } else {
+    el.interval.removeAttribute("aria-invalid");
+    el.rate.textContent = formatRate(interval.ms);
+    if (interval.ms < 10) {
+      el.interval.classList.add("warn");
+      setNote("Under 10 ms: some apps drop clicks", "warn");
+    } else {
+      if (!state.capturing) {
+        setNote(state.hotkeyAvailable ? `${state.hotkeyLabel} starts / stops` : `${state.hotkeyLabel} is taken by another app`,
+                state.hotkeyAvailable ? "" : "warn");
+      }
+    }
+  }
+
+  const countMode = choices.repeat.value === "count";
+  el.countInput.disabled = !countMode;
+  const countOk = !countMode || readCount() !== null;
+  if (countOk) {
+    el.countInput.removeAttribute("aria-invalid");
+  } else {
+    el.countInput.setAttribute("aria-invalid", "true");
+    if (!interval.error) setNote("Count must be a whole number", "error");
+  }
+
+  const ok = !interval.error && countOk;
+  el.toggle.setAttribute("aria-disabled", String(!ok && state.clicker === "idle"));
+  return ok ? interval : null;
+}
+
+/* ------------------------------------------------------------------ Actions */
+
+async function start() {
+  if (state.clicker !== "idle" || state.picking) return;
+  const interval = validate();
+  if (!interval) {
+    (el.interval.getAttribute("aria-invalid") ? el.interval : el.countInput).focus();
+    return;
+  }
+
+  // Optimistic: the button answers immediately; the worker confirms a moment later.
+  state.clicker = "running";
+  state.clicks = 0;
+  setCount(0);
+  setActiveVisual(true);
+  setStatus("Running", "running");
+  field.rippleFromSource();
+
+  const result = await bridge.start(
+    interval.value, interval.unit, choices.button.value, choices.type.value,
+    choices.repeat.value, readCount() ?? 1, choices.position.value);
+
+  if (!result || !result.ok) {
+    state.clicker = "idle";
+    setActiveVisual(false);
+    setStatus((result && result.error) || "Couldn't start", "error");
+    validate();
+  }
+}
+
+function stop() {
+  if (state.clicker === "idle") return;
+  bridge.stop();
+}
+
+async function startPick() {
+  if (state.clicker !== "idle") return;
+  const result = await bridge.pickStart();
+  if (!result || !result.ok) {
+    setStatus((result && result.error) || "Couldn't pick", "error");
+    if (!state.point) choices.position.selectValue("cursor");
+    return;
+  }
+  state.picking = true;
+  el.pick.setAttribute("aria-pressed", "true");
+  el.pickText.textContent = "Cancel";
+  setStatus("Click anywhere", "picking");
+  updateShortcut();
+}
+
+function finishPick() {
+  state.picking = false;
+  el.pick.setAttribute("aria-pressed", "false");
+  el.pickText.textContent = "Pick";
+  updateShortcut();
+}
+
+/* ------------------------------------------------------------------ Called from C */
+
+window.app = {
+  onStatus({ state: next, waiting, clicks, reason }) {
+    const previous = state.clicker;
+    state.clicker = next;
+
+    if (next === "running") {
+      if (previous !== "running") setActiveVisual(true);
+      if (waiting !== state.waiting || previous !== "running") {
+        state.waiting = waiting;
+        setStatus(waiting ? "Waiting" : "Running", waiting ? "waiting" : "running");
+        showHint(waiting);
+      }
+      // Each burst of new clicks sends a ripple (at most ~14 per second, so fast
+      // intervals read as a steady pulse rather than noise).
+      const nowMs = performance.now();
+      if (clicks > state.clicks && nowMs - state.lastRipple > 70) {
+        field.rippleFromSource();
+        state.lastRipple = nowMs;
+      }
+      state.clicks = clicks;
+      setCount(clicks);
+    } else {
+      state.waiting = false;
+      state.clicks = clicks;
+      showHint(false);
+      setCount(clicks);
+      if (reason === "completed") setStatus("Done", "done");
+      else setStatus(clicks > 0 ? "Stopped" : "Idle", "idle");
+      setActiveVisual(false);
+      validate();
+    }
+  },
+
+  onPicked(x, y) {
+    finishPick();
+    state.point = { x, y };
+    el.pointText.textContent = `${x}, ${y}`;
+    choices.position.selectValue("point");
+    setStatus("Point set", "done");
+  },
+
+  onPickCancelled() {
+    finishPick();
+    if (!state.point) choices.position.selectValue("cursor");
+    setStatus("Idle", "idle");
+  },
+
+  // A global hotkey (F6/Esc) was pressed: whatever it changes lands instantly.
+  onHotkey() { noteKeyboard(); },
+
+  onHotkeyStart() {
+    noteKeyboard();
+    start();
+  },
+};
+
+/* ------------------------------------------------------------------ Hotkey recording */
+
+// Click the key cap, then press the new combo. The native side releases the
+// current hotkey while recording so pressing it is recorded rather than
+// toggling the clicker, and validates every combo before registering it.
+
+function applyHotkeyInfo(info) {
+  if (info && typeof info.label === "string") state.hotkeyLabel = info.label;
+  state.hotkeyAvailable = !info || info.hotkey !== false;
+  updateShortcut();
+  validate();
+}
+
+function showCapturing(capturing) {
+  state.capturing = capturing;
+  el.hotkey.setAttribute("aria-pressed", String(capturing));
+  el.hotkey.textContent = capturing ? "Press keys" : state.hotkeyLabel;
+}
+
+async function beginCapture() {
+  if (state.capturing || state.clicker !== "idle" || state.picking) return;
+  const result = await bridge.captureBegin();
+  if (!result || !result.ok) {
+    setNote((result && result.error) || "Can't change the hotkey now", "error");
+    return;
+  }
+  showCapturing(true);
+  setNote("Press a key or combo · Esc cancels", "");
+}
+
+async function cancelCapture() {
+  if (!state.capturing) return;
+  showCapturing(false);
+  applyHotkeyInfo(await bridge.captureEnd());
+}
+
+const MODIFIER_KEYS = new Set(["Control", "Shift", "Alt", "Meta", "AltGraph", "CapsLock", "NumLock"]);
+
+async function onCaptureKey(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.repeat || state.settingHotkey) return;
+  if (e.key === "Escape") { cancelCapture(); return; }
+
+  if (MODIFIER_KEYS.has(e.key)) {
+    // Show the modifiers held so far while waiting for the actual key.
+    const held = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift"].filter(Boolean);
+    el.hotkey.textContent = held.length ? `${held.join("+")}+…` : "Press keys";
+    return;
+  }
+
+  // On Windows, Chromium's keyCode is the Win32 virtual-key code.
+  state.settingHotkey = true;
+  const result = await bridge.setHotkey(e.keyCode, Number(e.ctrlKey), Number(e.altKey), Number(e.shiftKey));
+  state.settingHotkey = false;
+
+  if (result && result.ok) {
+    showCapturing(false);
+    applyHotkeyInfo(result);
+    setNote(`Hotkey set to ${state.hotkeyLabel}`, "");
+  } else {
+    el.hotkey.textContent = "Press keys";
+    setNote((result && result.error) || "That key can't be used", "error");
+  }
+}
+
+// Capture phase, so recording wins over every other key handler on the page.
+window.addEventListener("keydown", e => { if (state.capturing) onCaptureKey(e); }, true);
+window.addEventListener("keyup", e => {
+  if (!state.capturing || state.settingHotkey || e.key === "Escape") return;
+  if (MODIFIER_KEYS.has(e.key) && !e.ctrlKey && !e.altKey && !e.shiftKey) el.hotkey.textContent = "Press keys";
+}, true);
+
+el.hotkey.addEventListener("click", () => {
+  if (state.capturing) cancelCapture();
+  else beginCapture();
+});
+el.hotkey.addEventListener("blur", () => { if (!state.settingHotkey) cancelCapture(); });
+
+/* ------------------------------------------------------------------ Wiring */
+
+const choices = {};
+document.querySelectorAll(".choice").forEach(root => {
+  choices[root.dataset.name] = new Choice(root, value => onChoiceChange(root.dataset.name, value));
+});
+
+function onChoiceChange(name, value) {
+  if (name === "unit") {
+    // Keep the same duration when switching units: 100 ms <-> 0.1 s.
+    const raw = parseFloat(el.interval.value);
+    if (Number.isFinite(raw)) {
+      const converted = value === "s" ? raw / 1000 : raw * 1000;
+      el.interval.value = String(Math.round(converted * 1000) / 1000);
+    }
+  }
+  if (name === "repeat" && value === "count") {
+    el.countInput.disabled = false;
+    el.countInput.focus();
+    el.countInput.select();
+  }
+  if (name === "position" && value === "point" && !state.point) startPick();
+  validate();
+}
+
+el.toggle.addEventListener("click", e => {
+  if (e.detail === 0) noteKeyboard();
+  if (state.clicker === "idle") start();
+  else stop();
+});
+
+el.pick.addEventListener("click", e => {
+  if (e.detail === 0) noteKeyboard();
+  if (state.picking) bridge.pickCancel();
+  else startPick();
+});
+
+el.interval.addEventListener("input", validate);
+el.countInput.addEventListener("input", validate);
+
+// Arrow keys nudge numeric fields; Shift for bigger steps.
+function nudge(input, e, stepFor) {
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+  e.preventDefault();
+  const current = parseFloat(input.value) || 0;
+  const step = stepFor() * (e.shiftKey ? 10 : 1);
+  const next = Math.max(0, current + (e.key === "ArrowUp" ? step : -step));
+  input.value = String(Math.round(next * 1000) / 1000);
+  validate();
+}
+el.interval.addEventListener("keydown", e => nudge(el.interval, e, () => choices.unit.value === "s" ? 0.1 : 1));
+el.countInput.addEventListener("keydown", e => nudge(el.countInput, e, () => 1));
+
+[el.interval, el.countInput].forEach(input => {
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter") { noteKeyboard(); start(); }
+  });
+});
+
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  noteKeyboard();
+  if (state.picking) bridge.pickCancel();
+  else stop();
+});
+
+document.addEventListener("contextmenu", e => {
+  if (!e.target.closest(".field")) e.preventDefault();
+});
+
+/* ------------------------------------------------------------------ Theme & layout */
+
+function layoutChoices() { Object.values(choices).forEach(c => c.moveBar(false)); }
+
+matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
+  field.applyTheme();
+  const active = state.clicker !== "idle";
+  const fill = { backgroundColor: cssVar(active ? "--signal" : "--primary"), color: cssVar(active ? "--on-signal" : "--on-primary") };
+  if (hasGsap) gsap.set(el.toggle, fill); else Object.assign(el.toggle.style, fill);
+});
+
+reducedMotion.addEventListener("change", () => {
+  if (reducedMotion.matches) field.disable(); else field.init();
+});
+
+addEventListener("resize", layoutChoices);
+addEventListener("pagehide", () => field.destroy());
+
+/* ------------------------------------------------------------------ Intro */
+
+// A composed power-on sequence: rules draw across the sheet, the counter rises
+// out of its mask, labels and controls settle in, and the field sends its first
+// pulse. Everything is visible and usable without it (it only animates *from*
+// hidden states), and it is skipped entirely under reduced motion.
+function intro() {
+  if (!motionOn()) return;
+  const tl = gsap.timeline({ defaults: { ease: "expo.out" } });
+  tl.from(".masthead > *", { opacity: 0, y: -6, duration: 0.6, stagger: 0.08 }, 0)
+    .from(".count", { yPercent: 105, duration: 1.0 }, 0.05)
+    .from(".caption > *", { opacity: 0, y: 4, duration: 0.6, stagger: 0.06 }, 0.3)
+    .from(".primary", { opacity: 0, y: 10, duration: 0.7 }, 0.18)
+    .from(".rule", { scaleX: 0, duration: 0.9, stagger: 0.05, ease: "expo.inOut" }, 0.2)
+    .from(".row > :not(.rule)", { opacity: 0, x: -6, duration: 0.6, stagger: 0.035 }, 0.38)
+    .from(".foot > *", { opacity: 0, duration: 0.6, stagger: 0.08 }, 0.7)
+    .add(() => field.rippleFromSource(), 0.35);
+}
+
+field.start();
+document.fonts.ready.then(() => {
+  layoutChoices();
+  fittedLength = 0;
+  setCount(state.clicks);
+});
+layoutChoices();
+setCount(0);
+validate();
+updateShortcut();
+if (hasGsap) {
+  gsap.set(el.hint, { autoAlpha: 0 });
+  // Hand the labels' resting positions to GSAP in percent. Left alone, GSAP
+  // would read the CSS translateY(100%) as a fixed 32px and keep it forever.
+  gsap.set(el.startLabel, { y: 0, yPercent: 0 });
+  gsap.set(el.stopLabel, { y: 0, yPercent: 100 });
+}
+intro();
+
+bridge.ready().then(applyHotkeyInfo);
+</script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+#include <winver.h>
+#include <winuser.h>
+#include "resource.h"
+
+IDI_APP_ICON ICON "app.ico"
+
+/* PerMonitorV2 DPI awareness: crisp text at any Windows display scaling. */
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     3,0,0,0
+PRODUCTVERSION  3,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "linxmedaille"
+            VALUE "FileDescription",  "Autoclicker"
+            VALUE "FileVersion",      "3.0.0"
+            VALUE "InternalName",     "autoclicker"
+            VALUE "OriginalFilename", "autoclicker.exe"
+            VALUE "ProductName",      "Autoclicker"
+            VALUE "ProductVersion",   "3.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
